@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""凌镜摄影社团 - 最简用户登录系统后端
+"""凌镜摄影社团 - 后端 API 服务
 
 纯 Python 标准库实现（http.server + sqlite3），零第三方依赖。
 启动: python3 app.py   （默认 0.0.0.0:8000，可用 PORT 环境变量覆盖）
@@ -9,16 +9,24 @@
   POST /api/auth/register     注册 {username, email, password}
   POST /api/auth/login        登录 {identifier, password}  -> {token, user}
   GET  /api/auth/me           当前用户（Authorization: Bearer <token>）
+  GET  /api/photos            作品列表（支持 ?cat= 筛选）
+  GET  /api/members            成员列表
+  GET  /api/departments       部门列表
+  GET  /api/diary             日记列表
+  GET  /api/history           历史事件
+  GET  /api/resources          资源列表
+  GET  /api/studio/equipment   工作室设备
 """
 import json
 import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 import auth
 import db
+import data
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
@@ -90,26 +98,51 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
         if path == "/api/health":
             self._send_json(200, {"ok": True, "service": "lingking-backend"})
         elif path == "/api/auth/me":
             user = self._require_auth()
             if user is not None:
                 self._send_json(200, {"user": _user_public(user)})
+        elif path == "/api/photos":
+            cat = query.get("cat", [None])[0]
+            photos = data.PHOTOS
+            if cat:
+                photos = [p for p in photos if p["cat"] == cat]
+            self._send_json(200, {"photos": photos})
+        elif path == "/api/members":
+            dept = query.get("dept", [None])[0]
+            members = data.MEMBERS
+            if dept:
+                members = [m for m in members if m["dept"] == dept]
+            self._send_json(200, {"members": members})
+        elif path == "/api/departments":
+            self._send_json(200, {"departments": data.DEPARTMENTS})
+        elif path == "/api/diary":
+            self._send_json(200, {"entries": data.DIARY_ENTRIES})
+        elif path == "/api/history":
+            self._send_json(200, {"events": data.HISTORY_EVENTS})
+        elif path == "/api/resources":
+            self._send_json(200, {"resources": data.RESOURCES})
+        elif path == "/api/studio/equipment":
+            self._send_json(200, {"equipment": data.STUDIO_EQUIPMENT})
         else:
             self._send_json(404, {"error": "Not Found"})
 
     def do_POST(self):
         path = urlparse(self.path).path
-        data = self._read_json()
-        if data is None:
+        body = self._read_json()
+        if body is None:
             return self._send_json(400, {"error": "请求体不是合法 JSON"})
 
         if path == "/api/auth/register":
-            self._handle_register(data)
+            self._handle_register(body)
         elif path == "/api/auth/login":
-            self._handle_login(data)
+            self._handle_login(body)
         else:
             self._send_json(404, {"error": "Not Found"})
 
