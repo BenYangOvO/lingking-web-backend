@@ -4,18 +4,34 @@
 纯 Python 标准库实现（http.server + sqlite3），零第三方依赖。
 启动: python3 app.py   （默认 0.0.0.0:8000，可用 PORT 环境变量覆盖）
 
+默认管理员: 用户名 admin / 密码 admin123 （首次启动后请尽快修改）
+
 接口:
-  GET  /api/health             健康检查
-  POST /api/auth/register     注册 {username, email, password}
-  POST /api/auth/login        登录 {identifier, password}  -> {token, user}
-  GET  /api/auth/me           当前用户（Authorization: Bearer <token>）
-  GET  /api/photos            作品列表（支持 ?cat= 筛选）
-  GET  /api/members            成员列表
-  GET  /api/departments       部门列表
-  GET  /api/diary             日记列表
-  GET  /api/history           历史事件
-  GET  /api/resources          资源列表
-  GET  /api/studio/equipment   工作室设备
+  [公共]
+  GET  /api/health
+  GET  /api/photos            作品列表 (静态 + 审核通过的投稿)
+  GET  /api/members
+  GET  /api/departments
+  GET  /api/diary             日记 (静态 + 审核通过的投稿)
+  GET  /api/history
+  GET  /api/resources         资源库 (静态 + 审核通过的投稿)
+  GET  /api/studio/equipment
+  POST /api/auth/register
+  POST /api/auth/login
+  GET  /api/auth/me           需登录
+
+  [需登录]
+  POST /api/submissions                  提交投稿
+  GET  /api/submissions/mine             我提交的
+  GET  /api/submissions/:id              详情 (本人或admin)
+
+  [需管理员]
+  GET    /api/admin/stats                仪表盘统计
+  GET    /api/admin/submissions          投稿列表 (支持 board/status 过滤)
+  GET    /api/admin/users                用户列表
+  POST   /api/admin/submissions/:id/review   {status:'approved'|'rejected', note?}
+  DELETE /api/admin/submissions/:id      删除投稿
+  POST   /api/admin/users/:id/role       {role:'admin'|'member'}
 """
 import json
 import os
@@ -36,7 +52,6 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _user_public(u):
-    """对外暴露的用户信息（绝不包含 password_hash）"""
     return {
         "id": u["id"],
         "username": u["username"],
@@ -48,8 +63,82 @@ def _user_public(u):
     }
 
 
+def _merge_photos():
+    static = list(data.PHOTOS)
+    # 审核通过的投稿转成前端需要的格式，按时间新→旧排在前面
+    for s in db.list_approved_board("photo"):
+        p = s["payload"] or {}
+        if not isinstance(p, dict):
+            continue
+        static.insert(
+            0,
+            {
+                "id": s["id"] + 10000,
+                "submission_id": s["id"],
+                "title": p.get("title", "未命名"),
+                "author": p.get("author") or s.get("submitter_name") or s.get("submitter_uname") or "社员",
+                "likes": int(p.get("likes") or 0),
+                "cat": p.get("cat", "投稿"),
+                "grad": p.get("grad", "linear-gradient(135deg, #2D5F8A, #4A90D9, #6AADE8)"),
+                "image": p.get("image") or None,
+                "desc": p.get("desc") or "",
+                "from_submission": True,
+                "approved_at": s.get("reviewed_at"),
+            },
+        )
+    return static
+
+
+def _merge_resources():
+    static = list(data.RESOURCES)
+    for s in db.list_approved_board("resource"):
+        p = s["payload"] or {}
+        if not isinstance(p, dict):
+            continue
+        static.insert(
+            0,
+            {
+                "id": s["id"] + 10000,
+                "submission_id": s["id"],
+                "title": p.get("title", "未命名干货"),
+                "cat": p.get("cat", "投稿"),
+                "summary": p.get("summary", p.get("full_desc", "")[:60]),
+                "fullDesc": p.get("fullDesc") or p.get("full_desc") or "",
+                "views": int(p.get("views") or 0),
+                "downloads": int(p.get("downloads") or 0),
+                "author": p.get("author") or s.get("submitter_name") or s.get("submitter_uname") or "社员",
+                "color": p.get("color", "#2D5F8A"),
+                "coverGrad": p.get("coverGrad") or p.get("cover_grad") or "linear-gradient(135deg, #667EEA, #764BA2)",
+                "from_submission": True,
+            },
+        )
+    return static
+
+
+def _merge_diary():
+    static = list(data.DIARY_ENTRIES)
+    for s in db.list_approved_board("diary"):
+        p = s["payload"] or {}
+        if not isinstance(p, dict):
+            continue
+        static.insert(
+            0,
+            {
+                "id": s["id"] + 10000,
+                "submission_id": s["id"],
+                "date": p.get("date", ""),
+                "title": p.get("title", "无标题"),
+                "content": p.get("content", ""),
+                "mood": p.get("mood", "happy"),
+                "author": p.get("author") or s.get("submitter_name") or s.get("submitter_uname") or "社员",
+                "from_submission": True,
+            },
+        )
+    return static
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "LingKing/0.1"
+    server_version = "LingKing/0.2"
 
     # ---- 基础工具 ----
 
@@ -59,6 +148,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
@@ -88,71 +179,191 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return user
 
-    # ---- HTTP 方法 ----
+    def _require_admin(self):
+        user = self._require_auth()
+        if user is None:
+            return None
+        if user["role"] != "admin":
+            self._send_json(403, {"error": "需要管理员权限"})
+            return None
+        return user
+
+    # ---- HTTP 方法分发 ----
 
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        path = parsed.path.rstrip("/")
         query = parse_qs(parsed.query)
 
+        # --- 公共 ---
         if path == "/api/health":
             self._send_json(200, {"ok": True, "service": "lingking-backend"})
-        elif path == "/api/auth/me":
+            return
+        if path == "/api/auth/me":
             user = self._require_auth()
             if user is not None:
                 self._send_json(200, {"user": _user_public(user)})
-        elif path == "/api/photos":
+            return
+        if path == "/api/photos":
             cat = query.get("cat", [None])[0]
-            photos = data.PHOTOS
+            photos = _merge_photos()
             if cat:
-                photos = [p for p in photos if p["cat"] == cat]
+                photos = [p for p in photos if p.get("cat") == cat]
             self._send_json(200, {"photos": photos})
-        elif path == "/api/members":
+            return
+        if path == "/api/members":
             dept = query.get("dept", [None])[0]
-            members = data.MEMBERS
+            members = list(data.MEMBERS)
             if dept:
-                members = [m for m in members if m["dept"] == dept]
+                members = [m for m in members if m.get("dept") == dept]
             self._send_json(200, {"members": members})
-        elif path == "/api/departments":
+            return
+        if path == "/api/departments":
             self._send_json(200, {"departments": data.DEPARTMENTS})
-        elif path == "/api/diary":
-            self._send_json(200, {"entries": data.DIARY_ENTRIES})
-        elif path == "/api/history":
+            return
+        if path == "/api/diary":
+            self._send_json(200, {"entries": _merge_diary()})
+            return
+        if path == "/api/history":
             self._send_json(200, {"events": data.HISTORY_EVENTS})
-        elif path == "/api/resources":
-            self._send_json(200, {"resources": data.RESOURCES})
-        elif path == "/api/studio/equipment":
+            return
+        if path == "/api/resources":
+            self._send_json(200, {"resources": _merge_resources()})
+            return
+        if path == "/api/studio/equipment":
             self._send_json(200, {"equipment": data.STUDIO_EQUIPMENT})
-        else:
+            return
+
+        # --- 登录用户 ---
+        if path == "/api/submissions/mine":
+            user = self._require_auth()
+            if user is None:
+                return
+            items = db.list_submissions(submitter_id=user["id"])
+            self._send_json(200, {"submissions": items})
+            return
+
+        # 管理员路由前缀
+        if path.startswith("/api/admin/"):
+            admin = self._require_admin()
+            if admin is None:
+                return
+            if path == "/api/admin/stats":
+                self._send_json(
+                    200,
+                    {
+                        "total_users": db.count_submissions(),  # alias 保持兼容
+                        "users_count": len(db.list_users(limit=10000)),
+                        "submissions_count": db.count_submissions(),
+                        "pending_count": db.count_submissions(status="pending"),
+                        "approved_count": db.count_submissions(status="approved"),
+                        "rejected_count": db.count_submissions(status="rejected"),
+                        "by_board": {
+                            "photo": db.count_submissions(board="photo"),
+                            "resource": db.count_submissions(board="resource"),
+                            "diary": db.count_submissions(board="diary"),
+                        },
+                    },
+                )
+                return
+            if path == "/api/admin/submissions":
+                board = query.get("board", [None])[0]
+                status = query.get("status", [None])[0]
+                items = db.list_submissions(board=board, status=status)
+                self._send_json(200, {"submissions": items})
+                return
+            if path == "/api/admin/users":
+                self._send_json(200, {"users": db.list_users(limit=1000)})
+                return
+            # 带 id 的: /api/admin/submissions/<id> 在 DELETE 里处理
             self._send_json(404, {"error": "Not Found"})
+            return
+
+        # /api/submissions/<id> 详情 (本人或admin)
+        m = re.match(r"^/api/submissions/(\d+)$", path)
+        if m:
+            sid = int(m.group(1))
+            user = self._require_auth()
+            if user is None:
+                return
+            s = db.get_submission(sid)
+            if not s:
+                self._send_json(404, {"error": "投稿不存在"})
+                return
+            if s["submitter_id"] != user["id"] and user["role"] != "admin":
+                self._send_json(403, {"error": "无权查看"})
+                return
+            self._send_json(200, {"submission": s})
+            return
+
+        self._send_json(404, {"error": "Not Found"})
 
     def do_POST(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
         body = self._read_json()
         if body is None:
             return self._send_json(400, {"error": "请求体不是合法 JSON"})
 
+        # 公共
         if path == "/api/auth/register":
-            self._handle_register(body)
-        elif path == "/api/auth/login":
-            self._handle_login(body)
-        else:
-            self._send_json(404, {"error": "Not Found"})
+            return self._handle_register(body)
+        if path == "/api/auth/login":
+            return self._handle_login(body)
 
-    # ---- 业务逻辑 ----
+        # 需登录
+        if path == "/api/submissions":
+            user = self._require_auth()
+            if user is None:
+                return
+            return self._handle_create_submission(user, body)
 
-    def _handle_register(self, data):
-        username = str(data.get("username", "")).strip()
-        email = str(data.get("email", "")).strip().lower()
-        password = str(data.get("password", ""))
+        # 管理员
+        if path.startswith("/api/admin/"):
+            admin = self._require_admin()
+            if admin is None:
+                return
+            m = re.match(r"^/api/admin/submissions/(\d+)/review$", path)
+            if m:
+                return self._handle_review(admin, int(m.group(1)), body)
+            m = re.match(r"^/api/admin/users/(\d+)/role$", path)
+            if m:
+                uid = int(m.group(1))
+                role = str(body.get("role") or "member")
+                db.set_user_role(uid, role)
+                return self._send_json(200, {"ok": True, "role": "admin" if role == "admin" else "member"})
+            return self._send_json(404, {"error": "Not Found"})
 
+        self._send_json(404, {"error": "Not Found"})
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        m = re.match(r"^/api/admin/submissions/(\d+)$", path)
+        if m:
+            admin = self._require_admin()
+            if admin is None:
+                return
+            sid = int(m.group(1))
+            if not db.get_submission(sid):
+                return self._send_json(404, {"error": "投稿不存在"})
+            db.delete_submission(sid)
+            return self._send_json(200, {"ok": True, "deleted": sid})
+        self._send_json(404, {"error": "Not Found"})
+
+    # ---- 业务处理 ----
+
+    def _handle_register(self, payload):
+        username = str(payload.get("username", "")).strip()
+        email = str(payload.get("email", "")).strip().lower()
+        password = str(payload.get("password", ""))
         if not USERNAME_RE.match(username):
             return self._send_json(400, {"error": "用户名需为 2-20 位字母/数字/下划线/中文"})
         if not EMAIL_RE.match(email):
@@ -161,25 +372,92 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(400, {"error": "密码至少 6 位"})
         if db.find_by_identifier(username) or db.find_by_identifier(email):
             return self._send_json(409, {"error": "用户名或邮箱已被占用"})
-
         uid = db.create_user(username, email, auth.hash_password(password))
         token = auth.make_token(uid)
         user = db.find_by_id(uid)
         self._send_json(201, {"token": token, "user": _user_public(user)})
 
-    def _handle_login(self, data):
-        identifier = str(data.get("identifier", "")).strip()
-        password = str(data.get("password", ""))
-
+    def _handle_login(self, payload):
+        identifier = str(payload.get("identifier", "")).strip()
+        password = str(payload.get("password", ""))
         if not identifier or not password:
             return self._send_json(400, {"error": "请输入用户名/邮箱和密码"})
-
         user = db.find_by_identifier(identifier)
         if not user or not auth.verify_password(password, user["password_hash"]):
             return self._send_json(401, {"error": "用户名/邮箱或密码错误"})
-
         token = auth.make_token(user["id"])
         self._send_json(200, {"token": token, "user": _user_public(user)})
+
+    # ---------- 投稿 ---------- #
+
+    def _validate_photo_payload(self, p):
+        errs = []
+        if not str(p.get("title", "")).strip():
+            errs.append("作品名不能为空")
+        return errs
+
+    def _validate_resource_payload(self, p):
+        errs = []
+        if not str(p.get("title", "")).strip():
+            errs.append("标题不能为空")
+        if not str(p.get("summary", "")).strip() and not str(p.get("full_desc", "")).strip() and not str(p.get("fullDesc", "")).strip():
+            errs.append("请填写内容简介或正文")
+        return errs
+
+    def _validate_diary_payload(self, p):
+        errs = []
+        if not str(p.get("title", "")).strip():
+            errs.append("日记标题不能为空")
+        if not str(p.get("content", "")).strip():
+            errs.append("日记内容不能为空")
+        return errs
+
+    def _handle_create_submission(self, user, payload):
+        board = str(payload.get("board", "")).strip()
+        p = payload.get("payload") or {}
+        if not isinstance(p, dict):
+            return self._send_json(400, {"error": "payload 必须是对象"})
+        if board == "photo":
+            errs = self._validate_photo_payload(p)
+        elif board == "resource":
+            errs = self._validate_resource_payload(p)
+        elif board == "diary":
+            errs = self._validate_diary_payload(p)
+        else:
+            return self._send_json(400, {"error": "不支持的板块: photo / resource / diary"})
+        if errs:
+            return self._send_json(400, {"error": errs[0]})
+
+        # normalize: 作者署名优先 payload.author，否则用用户昵称 / 用户名
+        author_name = str(p.get("author", "")).strip()
+        if not author_name:
+            author_name = user["nickname"] or user["username"]
+        if isinstance(p, dict) and "author" not in p:
+            p["author"] = author_name
+        else:
+            p["author"] = author_name
+
+        try:
+            sid = db.create_submission(
+                board=board,
+                payload=p,
+                submitter_id=user["id"],
+                submitter_name=user["nickname"] or user["username"],
+            )
+        except ValueError as e:
+            return self._send_json(400, {"error": str(e)})
+        self._send_json(201, {"ok": True, "id": sid, "status": "pending"})
+
+    def _handle_review(self, admin, sid, payload):
+        s = db.get_submission(sid)
+        if not s:
+            return self._send_json(404, {"error": "投稿不存在"})
+        new_status = str(payload.get("status", "")).strip()
+        note = str(payload.get("note") or "").strip() or None
+        if new_status not in ("approved", "rejected"):
+            return self._send_json(400, {"error": "status 必须为 approved 或 rejected"})
+        db.review_submission(sid, new_status, admin["id"], note)
+        self._send_json(200, {"ok": True, "id": sid, "status": new_status})
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
