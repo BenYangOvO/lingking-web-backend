@@ -52,13 +52,16 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _user_public(u):
+    if hasattr(u, "keys"):
+        u = dict(u)
     return {
         "id": u["id"],
         "username": u["username"],
         "email": u["email"],
-        "nickname": u["nickname"],
-        "avatar": u["avatar"],
-        "role": u["role"],
+        "nickname": u.get("nickname", ""),
+        "avatar": u.get("avatar", ""),
+        "bio": u.get("bio", ""),
+        "role": u.get("role", "member"),
         "created_at": u["created_at"],
     }
 
@@ -325,6 +328,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._handle_create_submission(user, body)
 
+        if path == "/api/auth/profile":
+            user = self._require_auth()
+            if user is None:
+                return
+            return self._handle_update_profile(user, body)
+
+        if path == "/api/auth/password":
+            user = self._require_auth()
+            if user is None:
+                return
+            return self._handle_change_password(user, body)
+
         # 管理员
         if path.startswith("/api/admin/"):
             admin = self._require_admin()
@@ -458,6 +473,43 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(400, {"error": "status 必须为 approved 或 rejected"})
         db.review_submission(sid, new_status, admin["id"], note)
         self._send_json(200, {"ok": True, "id": sid, "status": new_status})
+
+    def _handle_update_profile(self, user, payload):
+        username = payload.get("username")
+        nickname = payload.get("nickname")
+        avatar = payload.get("avatar")
+        bio = payload.get("bio")
+
+        if username is not None:
+            username = str(username).strip()
+            if not USERNAME_RE.match(username):
+                return self._send_json(400, {"error": "用户名需为 2-20 位字母/数字/下划线/中文"})
+            existing = db.find_by_identifier(username)
+            if existing and existing["id"] != user["id"]:
+                return self._send_json(409, {"error": "用户名已被占用"})
+
+        if nickname is not None:
+            nickname = str(nickname).strip()[:50]
+        if avatar is not None:
+            avatar = str(avatar).strip()[:500]
+        if bio is not None:
+            bio = str(bio).strip()[:1000]
+
+        db.update_user_profile(user["id"], username=username, nickname=nickname, avatar=avatar, bio=bio)
+        updated = db.find_by_id(user["id"])
+        self._send_json(200, {"ok": True, "user": _user_public(updated)})
+
+    def _handle_change_password(self, user, payload):
+        old_password = str(payload.get("old_password", ""))
+        new_password = str(payload.get("new_password", ""))
+        if not old_password or not new_password:
+            return self._send_json(400, {"error": "请填写旧密码和新密码"})
+        if len(new_password) < 6:
+            return self._send_json(400, {"error": "新密码至少 6 位"})
+        if not auth.verify_password(old_password, user["password_hash"]):
+            return self._send_json(401, {"error": "旧密码不正确"})
+        db.update_user_password(user["id"], auth.hash_password(new_password))
+        self._send_json(200, {"ok": True})
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
