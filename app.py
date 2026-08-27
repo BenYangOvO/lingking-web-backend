@@ -227,11 +227,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, {"ok": True, "service": "lingking-backend"})
             return
-        if path == "/api/upload":
-            user = self._require_auth()
-            if user is None:
-                return
-            return self._handle_upload(user, body)
         if path == "/api/auth/me":
             user = self._require_auth()
             if user is not None:
@@ -356,6 +351,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_login(body)
 
         # 需登录
+        if path == "/api/upload":
+            user = self._require_auth()
+            if user is None:
+                return
+            return self._handle_upload(user, body)
         if path == "/api/submissions":
             user = self._require_auth()
             if user is None:
