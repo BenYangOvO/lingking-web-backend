@@ -68,6 +68,8 @@ def _user_public(u):
 
 def _merge_photos():
     static = list(data.PHOTOS)
+    hidden = db.get_hidden_static_ids("photo")
+    static = [p for p in static if p.get("id") not in hidden]
     # 审核通过的投稿转成前端需要的格式，按时间新→旧排在前面
     for s in db.list_approved_board("photo"):
         p = s["payload"] or {}
@@ -94,6 +96,8 @@ def _merge_photos():
 
 def _merge_resources():
     static = list(data.RESOURCES)
+    hidden = db.get_hidden_static_ids("resource")
+    static = [r for r in static if r.get("id") not in hidden]
     for s in db.list_approved_board("resource"):
         p = s["payload"] or {}
         if not isinstance(p, dict):
@@ -120,6 +124,8 @@ def _merge_resources():
 
 def _merge_diary():
     static = list(data.DIARY_ENTRIES)
+    hidden = db.get_hidden_static_ids("diary")
+    static = [d for d in static if d.get("id") not in hidden]
     for s in db.list_approved_board("diary"):
         p = s["payload"] or {}
         if not isinstance(p, dict):
@@ -285,6 +291,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/admin/users":
                 self._send_json(200, {"users": db.list_users(limit=1000)})
                 return
+            if path == "/api/admin/content":
+                ctype = query.get("type", [None])[0]
+                if ctype == "photo":
+                    self._send_json(200, {"items": _merge_photos()})
+                elif ctype == "resource":
+                    self._send_json(200, {"items": _merge_resources()})
+                elif ctype == "diary":
+                    self._send_json(200, {"items": _merge_diary()})
+                else:
+                    self._send_json(400, {"error": "type 必须为 photo / resource / diary"})
+                return
             # 带 id 的: /api/admin/submissions/<id> 在 DELETE 里处理
             self._send_json(404, {"error": "Not Found"})
             return
@@ -361,6 +378,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        query = parse_qs(parsed.query)
+
+        # DELETE /api/admin/content?type=photo&id=1
+        if path == "/api/admin/content":
+            admin = self._require_admin()
+            if admin is None:
+                return
+            ctype = query.get("type", [None])[0]
+            item_id = query.get("id", [None])[0]
+            if not ctype or not item_id:
+                return self._send_json(400, {"error": "缺少 type 或 id 参数"})
+            try:
+                item_id_int = int(item_id)
+            except ValueError:
+                return self._send_json(400, {"error": "id 必须为数字"})
+
+            if ctype in ("photo", "resource", "diary"):
+                board_map = {"photo": "photo", "resource": "resource", "diary": "diary"}
+                board = board_map[ctype]
+                if item_id_int >= 10000:
+                    # 投稿内容 → 删除投稿记录
+                    sid = item_id_int - 10000
+                    if not db.get_submission(sid):
+                        return self._send_json(404, {"error": "投稿不存在"})
+                    db.delete_submission(sid)
+                    return self._send_json(200, {"ok": True, "deleted_submission": sid})
+                else:
+                    # 静态内容 → 加入隐藏表
+                    db.hide_static(board, item_id_int)
+                    return self._send_json(200, {"ok": True, "hidden_static": item_id_int, "board": board})
+            else:
+                return self._send_json(400, {"error": "type 必须为 photo / resource / diary"})
+
+        # DELETE /api/admin/submissions/<id>
         m = re.match(r"^/api/admin/submissions/(\d+)$", path)
         if m:
             admin = self._require_admin()

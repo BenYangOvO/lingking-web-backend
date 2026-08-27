@@ -86,6 +86,18 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_created ON submissions(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_submitter ON submissions(submitter_id)")
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hidden_static (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                board         TEXT NOT NULL,
+                static_id     INTEGER NOT NULL,
+                hidden_at     INTEGER NOT NULL,
+                UNIQUE(board, static_id)
+            )
+            """
+        )
+
     _ensure_default_admin()
 
 
@@ -259,3 +271,53 @@ def list_approved_board(board: str):
             (board,),
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
+
+
+# ----------------- 静态内容隐藏 ----------------- #
+
+def get_hidden_static_ids(board: str):
+    """返回某板块被管理员隐藏的静态内容 ID 集合"""
+    if board not in VALID_BOARDS:
+        return set()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT static_id FROM hidden_static WHERE board=?", (board,)
+        ).fetchall()
+        return {r["static_id"] for r in rows}
+
+
+def hide_static(board: str, static_id: int):
+    """隐藏一条静态内容"""
+    if board not in VALID_BOARDS:
+        raise ValueError(f"不支持的板块: {board}")
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO hidden_static (board, static_id, hidden_at) VALUES (?, ?, ?)",
+            (board, int(static_id), int(time.time())),
+        )
+
+
+def unhide_static(board: str, static_id: int):
+    """取消隐藏一条静态内容"""
+    if board not in VALID_BOARDS:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM hidden_static WHERE board=? AND static_id=?",
+            (board, int(static_id)),
+        )
+
+
+def list_hidden_static(board: str = None):
+    """列出被隐藏的静态内容"""
+    sql = "SELECT * FROM hidden_static"
+    args = []
+    if board:
+        if board not in VALID_BOARDS:
+            return []
+        sql += " WHERE board=?"
+        args.append(board)
+    sql += " ORDER BY hidden_at DESC"
+    with get_conn() as conn:
+        rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
