@@ -33,10 +33,14 @@
   DELETE /api/admin/submissions/:id      删除投稿
   POST   /api/admin/users/:id/role       {role:'admin'|'member'}
 """
+import base64
+import binascii
 import json
 import os
 import re
 import sys
+import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -46,6 +50,13 @@ import data
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+ALLOWED_EXT = {"jpeg", "jpg", "png", "gif", "webp"}
+# 5MB 单图限制
+MAX_IMG_BYTES = 5 * 1024 * 1024
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -216,6 +227,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, {"ok": True, "service": "lingking-backend"})
             return
+        if path == "/api/upload":
+            user = self._require_auth()
+            if user is None:
+                return
+            return self._handle_upload(user, body)
         if path == "/api/auth/me":
             user = self._require_auth()
             if user is not None:
@@ -569,6 +585,55 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(401, {"error": "旧密码不正确"})
         db.update_user_password(user["id"], auth.hash_password(new_password))
         self._send_json(200, {"ok": True})
+
+    # --- 图片上传 ---
+    def _handle_upload(self, user, payload):
+        """POST /api/upload  {image_b64: 'data:image/jpeg;base64,XXXX' 或纯 base64, ext?: 'jpg'}"""
+        image_b64 = payload.get("image_b64") or payload.get("image") or payload.get("data")
+        if not image_b64 or not isinstance(image_b64, str):
+            return self._send_json(400, {"error": "缺少 image_b64 字段"})
+
+        ext = (payload.get("ext") or "").lower().replace(".", "")
+        pure_b64 = image_b64
+        # data:image/jpeg;base64,xxxxxx 格式解析
+        if image_b64.startswith("data:image/") and ";base64," in image_b64:
+            head, pure_b64 = image_b64.split(";base64,", 1)
+            mime = head.split(":", 1)[1]
+            if not ext:
+                ext = mime.split("/")[1].split(";")[0].lower()
+                if ext == "jpeg":
+                    ext = "jpg"
+
+        ext = ext.lower() if ext else "jpg"
+        if ext not in ALLOWED_EXT:
+            return self._send_json(400, {"error": f"不支持的图片格式: {ext}，仅允许 jpg/jpeg/png/gif/webp"})
+
+        try:
+            raw = base64.b64decode(pure_b64.split(",")[-1], validate=True)
+        except (binascii.Error, ValueError):
+            return self._send_json(400, {"error": "图片 base64 解码失败，请检查上传数据"})
+
+        if len(raw) > MAX_IMG_BYTES:
+            return self._send_json(400, {"error": f"图片过大，限制 {MAX_IMG_BYTES//1024//1024}MB 以内"})
+        if len(raw) < 32:
+            return self._send_json(400, {"error": "图片内容过小或损坏"})
+
+        now = int(time.time())
+        sub_dir = time.strftime("%Y/%m", time.localtime(now))
+        save_dir = os.path.join(UPLOAD_DIR, sub_dir)
+        os.makedirs(save_dir, exist_ok=True)
+        fname = f"{uuid.uuid4().hex}.{ext}"
+        fpath = os.path.join(save_dir, fname)
+        with open(fpath, "wb") as f:
+            f.write(raw)
+
+        public_url = f"/uploads/{sub_dir}/{fname}"
+        return self._send_json(200, {
+            "ok": True,
+            "url": public_url,
+            "size": len(raw),
+            "ext": ext,
+        })
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
