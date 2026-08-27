@@ -51,15 +51,20 @@ def init_db():
                 password_hash TEXT NOT NULL,
                 nickname      TEXT NOT NULL DEFAULT '',
                 avatar        TEXT NOT NULL DEFAULT '',
+                birthday      TEXT NOT NULL DEFAULT '',
                 bio           TEXT NOT NULL DEFAULT '',
                 role          TEXT NOT NULL DEFAULT 'member',
                 created_at    INTEGER NOT NULL
             )
             """
         )
-        # 为已有数据库添加 bio 字段（幂等）
+        # 为已有数据库添加字段（幂等）
         try:
             conn.execute("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN birthday TEXT NOT NULL DEFAULT ''")
         except Exception:
             pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
@@ -158,7 +163,7 @@ def set_user_role(uid: int, role: str):
         conn.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
 
 
-def update_user_profile(uid: int, username: str = None, nickname: str = None, avatar: str = None, bio: str = None):
+def update_user_profile(uid: int, username: str = None, nickname: str = None, avatar: str = None, birthday: str = None, bio: str = None):
     fields = []
     args = []
     if username is not None:
@@ -170,6 +175,9 @@ def update_user_profile(uid: int, username: str = None, nickname: str = None, av
     if avatar is not None:
         fields.append("avatar = ?")
         args.append(avatar)
+    if birthday is not None:
+        fields.append("birthday = ?")
+        args.append(birthday)
     if bio is not None:
         fields.append("bio = ?")
         args.append(bio)

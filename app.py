@@ -60,6 +60,7 @@ def _user_public(u):
         "email": u["email"],
         "nickname": u.get("nickname", ""),
         "avatar": u.get("avatar", ""),
+        "birthday": u.get("birthday", ""),
         "bio": u.get("bio", ""),
         "role": u.get("role", "member"),
         "created_at": u["created_at"],
@@ -529,6 +530,7 @@ class Handler(BaseHTTPRequestHandler):
         username = payload.get("username")
         nickname = payload.get("nickname")
         avatar = payload.get("avatar")
+        birthday = payload.get("birthday")
         bio = payload.get("bio")
 
         if username is not None:
@@ -543,10 +545,16 @@ class Handler(BaseHTTPRequestHandler):
             nickname = str(nickname).strip()[:50]
         if avatar is not None:
             avatar = str(avatar).strip()[:500]
+        if birthday is not None:
+            birthday = str(birthday).strip()[:20]
+            # YYYY-MM-DD 格式校验（允许空）
+            import re as _re
+            if birthday and not _re.match(r"^\d{4}-\d{2}-\d{2}$", birthday):
+                return self._send_json(400, {"error": "生日格式应为 YYYY-MM-DD"})
         if bio is not None:
             bio = str(bio).strip()[:1000]
 
-        db.update_user_profile(user["id"], username=username, nickname=nickname, avatar=avatar, bio=bio)
+        db.update_user_profile(user["id"], username=username, nickname=nickname, avatar=avatar, birthday=birthday, bio=bio)
         updated = db.find_by_id(user["id"])
         self._send_json(200, {"ok": True, "user": _user_public(updated)})
 
