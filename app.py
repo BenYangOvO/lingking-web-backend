@@ -55,8 +55,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_EXT = {"jpeg", "jpg", "png", "gif", "webp"}
-# 5MB 单图限制
-MAX_IMG_BYTES = 5 * 1024 * 1024
+# 10MB 单图限制
+MAX_IMG_BYTES = 10 * 1024 * 1024
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
