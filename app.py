@@ -16,6 +16,7 @@
   GET  /api/history
   GET  /api/resources         资源库 (静态 + 审核通过的投稿)
   GET  /api/studio/equipment
+  GET  /api/site/:slug        站点固定内容(首页/关于/历史/部门/工作室)，slug in {home,about,history,departments,studio}
   POST /api/auth/register
   POST /api/auth/login
   GET  /api/auth/me           需登录
@@ -32,6 +33,8 @@
   POST   /api/admin/submissions/:id/review   {status:'approved'|'rejected', note?}
   DELETE /api/admin/submissions/:id      删除投稿
   POST   /api/admin/users/:id/role       {role:'admin'|'member'}
+  DELETE /api/admin/users/:id            删除成员账号(同时级联删除其全部投稿；禁止删除自己)
+  PUT    /api/site/:slug                 更新站点固定内容 body: { content: {...} } (slug 同上)
 """
 import base64
 import binascii
@@ -170,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
@@ -214,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
@@ -260,6 +263,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/studio/equipment":
             self._send_json(200, {"equipment": data.STUDIO_EQUIPMENT})
+            return
+
+        # 站点固定内容（公共读）
+        m = re.match(r"^/api/site/([a-z_]+)$", path)
+        if m:
+            slug = m.group(1)
+            if slug not in db.VALID_SITE_SLUGS:
+                self._send_json(400, {"error": f"slug 必须为 {sorted(db.VALID_SITE_SLUGS)} 之一"})
+                return
+            saved = db.get_site_content(slug)
+            self._send_json(
+                200,
+                {
+                    "slug": slug,
+                    "content": saved["content"] if saved else None,
+                    "updated_at": saved["updated_at"] if saved else None,
+                    "updated_by": saved["updated_by"] if saved else None,
+                    "saved": bool(saved),
+                },
+            )
             return
 
         # --- 登录用户 ---
@@ -439,6 +462,49 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(404, {"error": "投稿不存在"})
             db.delete_submission(sid)
             return self._send_json(200, {"ok": True, "deleted": sid})
+
+        # DELETE /api/admin/users/<id>  删除成员（禁止删除自己）
+        m = re.match(r"^/api/admin/users/(\d+)$", path)
+        if m:
+            admin = self._require_admin()
+            if admin is None:
+                return
+            uid = int(m.group(1))
+            if not db.find_by_id(uid):
+                return self._send_json(404, {"error": "用户不存在"})
+            try:
+                ok = db.delete_user(uid, operator_id=admin["id"])
+            except PermissionError as e:
+                return self._send_json(400, {"error": str(e)})
+            return self._send_json(200, {"ok": True, "deleted_user": uid if ok else False})
+
+        self._send_json(404, {"error": "Not Found"})
+
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        body = self._read_json()
+        if body is None and int(self.headers.get("Content-Length", 0) or 0) > 0:
+            return self._send_json(400, {"error": "请求体不是合法 JSON"})
+        body = body or {}
+
+        # PUT /api/site/<slug>  管理员：更新站点固定内容
+        m = re.match(r"^/api/site/([a-z_]+)$", path)
+        if m:
+            admin = self._require_admin()
+            if admin is None:
+                return
+            slug = m.group(1)
+            if slug not in db.VALID_SITE_SLUGS:
+                return self._send_json(400, {"error": f"slug 必须为 {sorted(db.VALID_SITE_SLUGS)} 之一"})
+            content = body.get("content")
+            if content is None:
+                return self._send_json(400, {"error": "缺少 content 字段（必须传 dict / list）"})
+            if not isinstance(content, dict):
+                return self._send_json(400, {"error": "content 必须是对象 {}"})
+            saved = db.set_site_content(slug, content, updated_by=admin["id"])
+            return self._send_json(200, {"ok": True, "data": saved})
+
         self._send_json(404, {"error": "Not Found"})
 
     # ---- 业务处理 ----

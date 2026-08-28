@@ -103,6 +103,20 @@ def init_db():
             """
         )
 
+        # 站点固定内容（首页、关于、历史、部门、工作室等页面可编辑数据）
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS site_content (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug          TEXT NOT NULL UNIQUE,
+                content_json  TEXT NOT NULL,
+                updated_at    INTEGER NOT NULL,
+                updated_by    INTEGER
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_site_content_slug ON site_content(slug)")
+
     _ensure_default_admin()
 
 
@@ -161,6 +175,21 @@ def set_user_role(uid: int, role: str):
     role = "admin" if role == "admin" else "member"
     with get_conn() as conn:
         conn.execute("UPDATE users SET role=? WHERE id=?", (role, uid))
+
+
+def delete_user(uid: int, operator_id: int = None) -> bool:
+    """删除用户及其投稿；若 operator_id 与 uid 相同（删除自己）则拒绝。返回是否真正删除。"""
+    uid = int(uid)
+    if operator_id is not None and int(operator_id) == uid:
+        raise PermissionError("不能删除你自己的账号")
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM users WHERE id=?", (uid,)).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM users WHERE id=?", (uid,))
+        # 同时清理该用户提交的投稿（UGC 已随账号归属，账号注销则一起删除）
+        conn.execute("DELETE FROM submissions WHERE submitter_id=?", (uid,))
+        return True
 
 
 def update_user_profile(uid: int, username: str = None, nickname: str = None, avatar: str = None, birthday: str = None, bio: str = None):
@@ -329,3 +358,56 @@ def list_hidden_static(board: str = None):
     with get_conn() as conn:
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
+
+
+# ----------------- 站点固定内容（可编辑） ----------------- #
+
+VALID_SITE_SLUGS = {
+    "home", "history", "departments", "about", "studio",
+}
+
+
+def get_site_content(slug: str):
+    """按 slug 获取站点内容 dict；若不存在返回 None。"""
+    slug = str(slug or "").strip()
+    if not slug:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT slug, content_json, updated_at, updated_by FROM site_content WHERE slug=?",
+            (slug,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            content = json.loads(row["content_json"]) if row["content_json"] else {}
+        except Exception:
+            content = {}
+        return {
+            "slug": row["slug"],
+            "content": content,
+            "updated_at": row["updated_at"],
+            "updated_by": row["updated_by"],
+        }
+
+
+def set_site_content(slug: str, content, updated_by: int = None):
+    """设置站点内容（Upsert）。content 必须是可 JSON 序列化的 dict。"""
+    slug = str(slug or "").strip()
+    if not slug:
+        raise ValueError("slug 不能为空")
+    with get_conn() as conn:
+        payload_json = json.dumps(content or {}, ensure_ascii=False)
+        now = int(time.time())
+        conn.execute(
+            """
+            INSERT INTO site_content (slug, content_json, updated_at, updated_by)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(slug) DO UPDATE SET
+                content_json = excluded.content_json,
+                updated_at   = excluded.updated_at,
+                updated_by   = excluded.updated_by
+            """,
+            (slug, payload_json, now, int(updated_by) if updated_by else None),
+        )
+    return get_site_content(slug)
