@@ -58,8 +58,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_EXT = {"jpeg", "jpg", "png", "gif", "webp"}
+# 文档类（完整历史讲述等）：Word / PDF
+ALLOWED_DOC_EXT = {"doc", "docx", "pdf"}
 # 10MB 单图限制
 MAX_IMG_BYTES = 10 * 1024 * 1024
+# 20MB 单文档限制
+MAX_DOC_BYTES = 20 * 1024 * 1024
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -243,10 +247,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"photos": photos})
             return
         if path == "/api/members":
-            dept = query.get("dept", [None])[0]
-            members = list(data.MEMBERS)
-            if dept:
-                members = [m for m in members if m.get("dept") == dept]
+            # 成员展示与网站账号信息同步：返回真实注册用户
+            users = db.list_users(limit=10000)
+            members = [
+                {
+                    "id": u["id"],
+                    "name": u["nickname"] or u["username"],
+                    "username": u["username"],
+                    "nickname": u["nickname"] or "",
+                    "avatar": u["avatar"] or "",
+                    "bio": u["bio"] or "",
+                    "role": u["role"],
+                }
+                for u in users
+            ]
             self._send_json(200, {"members": members})
             return
         if path == "/api/departments":
@@ -652,17 +666,17 @@ class Handler(BaseHTTPRequestHandler):
         db.update_user_password(user["id"], auth.hash_password(new_password))
         self._send_json(200, {"ok": True})
 
-    # --- 图片上传 ---
+    # --- 文件上传（图片 + 文档） ---
     def _handle_upload(self, user, payload):
-        """POST /api/upload  {image_b64: 'data:image/jpeg;base64,XXXX' 或纯 base64, ext?: 'jpg'}"""
+        """POST /api/upload  {image_b64: 'data:...;base64,XXXX' 或纯 base64, ext?: 'jpg'|'docx'|'pdf'...}"""
         image_b64 = payload.get("image_b64") or payload.get("image") or payload.get("data")
         if not image_b64 or not isinstance(image_b64, str):
             return self._send_json(400, {"error": "缺少 image_b64 字段"})
 
         ext = (payload.get("ext") or "").lower().replace(".", "")
         pure_b64 = image_b64
-        # data:image/jpeg;base64,xxxxxx 格式解析
-        if image_b64.startswith("data:image/") and ";base64," in image_b64:
+        # data:<mime>;base64,xxxxxx 格式解析
+        if image_b64.startswith("data:") and ";base64," in image_b64:
             head, pure_b64 = image_b64.split(";base64,", 1)
             mime = head.split(":", 1)[1]
             if not ext:
@@ -671,18 +685,22 @@ class Handler(BaseHTTPRequestHandler):
                     ext = "jpg"
 
         ext = ext.lower() if ext else "jpg"
-        if ext not in ALLOWED_EXT:
-            return self._send_json(400, {"error": f"不支持的图片格式: {ext}，仅允许 jpg/jpeg/png/gif/webp"})
+        if ext in ALLOWED_DOC_EXT:
+            max_bytes = MAX_DOC_BYTES
+        elif ext in ALLOWED_EXT:
+            max_bytes = MAX_IMG_BYTES
+        else:
+            return self._send_json(400, {"error": f"不支持的格式: {ext}，仅允许 jpg/jpeg/png/gif/webp 图片及 doc/docx/pdf 文档"})
 
         try:
             raw = base64.b64decode(pure_b64.split(",")[-1], validate=True)
         except (binascii.Error, ValueError):
-            return self._send_json(400, {"error": "图片 base64 解码失败，请检查上传数据"})
+            return self._send_json(400, {"error": "文件 base64 解码失败，请检查上传数据"})
 
-        if len(raw) > MAX_IMG_BYTES:
-            return self._send_json(400, {"error": f"图片过大，限制 {MAX_IMG_BYTES//1024//1024}MB 以内"})
+        if len(raw) > max_bytes:
+            return self._send_json(400, {"error": f"文件过大，限制 {max_bytes//1024//1024}MB 以内"})
         if len(raw) < 32:
-            return self._send_json(400, {"error": "图片内容过小或损坏"})
+            return self._send_json(400, {"error": "文件内容过小或损坏"})
 
         now = int(time.time())
         sub_dir = time.strftime("%Y/%m", time.localtime(now))
