@@ -86,7 +86,7 @@ def _user_public(u):
 
 
 def _merge_photos():
-    static = list(data.PHOTOS)
+    static = [{**p, "uuid": str(p.get("id"))} for p in data.PHOTOS]
     hidden = db.get_hidden_static_ids("photo")
     static = [p for p in static if p.get("id") not in hidden]
     # 审核通过的投稿转成前端需要的格式，按时间新→旧排在前面
@@ -99,6 +99,7 @@ def _merge_photos():
             {
                 "id": s["id"] + 10000,
                 "submission_id": s["id"],
+                "uuid": s.get("uuid") or str(s["id"] + 10000),
                 "title": p.get("title", "未命名"),
                 "author": p.get("author") or s.get("submitter_name") or s.get("submitter_uname") or "社员",
                 "likes": int(p.get("likes") or 0),
@@ -114,7 +115,7 @@ def _merge_photos():
 
 
 def _merge_resources():
-    static = list(data.RESOURCES)
+    static = [{**r, "uuid": str(r.get("id"))} for r in data.RESOURCES]
     hidden = db.get_hidden_static_ids("resource")
     static = [r for r in static if r.get("id") not in hidden]
     for s in db.list_approved_board("resource"):
@@ -126,6 +127,7 @@ def _merge_resources():
             {
                 "id": s["id"] + 10000,
                 "submission_id": s["id"],
+                "uuid": s.get("uuid") or str(s["id"] + 10000),
                 "title": p.get("title", "未命名干货"),
                 "cat": p.get("cat", "投稿"),
                 "summary": p.get("summary", p.get("full_desc", "")[:60]),
@@ -142,7 +144,7 @@ def _merge_resources():
 
 
 def _merge_diary():
-    static = list(data.DIARY_ENTRIES)
+    static = [{**d, "uuid": str(d.get("id"))} for d in data.DIARY_ENTRIES]
     hidden = db.get_hidden_static_ids("diary")
     static = [d for d in static if d.get("id") not in hidden]
     for s in db.list_approved_board("diary"):
@@ -154,6 +156,7 @@ def _merge_diary():
             {
                 "id": s["id"] + 10000,
                 "submission_id": s["id"],
+                "uuid": s.get("uuid") or str(s["id"] + 10000),
                 "date": p.get("date", ""),
                 "title": p.get("title", "无标题"),
                 "content": p.get("content", ""),
@@ -370,6 +373,38 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "无权查看"})
                 return
             self._send_json(200, {"submission": s})
+            return
+
+        # /api/posts/<uuid> 单篇内容详情（供前端与SEO爬虫按 uuid 访问）
+        m = re.match(r"^/api/posts/([A-Za-z0-9_\-]+)$", path)
+        if m:
+            item_uuid = m.group(1)
+            # 1. 查找数据库投稿
+            s = db.get_submission_by_uuid(item_uuid)
+            if s:
+                if s["status"] != "approved":
+                    user = self._require_auth()
+                    if not user or (s["submitter_id"] != user["id"] and user["role"] != "admin"):
+                        self._send_json(403, {"error": "该帖子暂未公开或处于审核中"})
+                        return
+                self._send_json(200, {"ok": True, "post": s, "board": s["board"]})
+                return
+
+            # 2. 查找静态预设作品/日记/资源
+            p_match = next((p for p in _merge_photos() if str(p.get("uuid")) == item_uuid or str(p.get("id")) == item_uuid), None)
+            if p_match:
+                self._send_json(200, {"ok": True, "post": p_match, "board": "photo"})
+                return
+            d_match = next((d for d in _merge_diary() if str(d.get("uuid")) == item_uuid or str(d.get("id")) == item_uuid), None)
+            if d_match:
+                self._send_json(200, {"ok": True, "post": d_match, "board": "diary"})
+                return
+            r_match = next((r for r in _merge_resources() if str(r.get("uuid")) == item_uuid or str(r.get("id")) == item_uuid), None)
+            if r_match:
+                self._send_json(200, {"ok": True, "post": r_match, "board": "resource"})
+                return
+
+            self._send_json(404, {"error": "未找到对应内容"})
             return
 
         self._send_json(404, {"error": "Not Found"})
@@ -601,7 +636,7 @@ class Handler(BaseHTTPRequestHandler):
             p["author"] = author_name
 
         try:
-            sid = db.create_submission(
+            sid, item_uuid = db.create_submission(
                 board=board,
                 payload=p,
                 submitter_id=user["id"],
@@ -609,7 +644,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         except ValueError as e:
             return self._send_json(400, {"error": str(e)})
-        self._send_json(201, {"ok": True, "id": sid, "status": "pending"})
+        self._send_json(201, {"ok": True, "id": sid, "uuid": item_uuid, "status": "pending"})
 
     def _handle_review(self, admin, sid, payload):
         s = db.get_submission(sid)

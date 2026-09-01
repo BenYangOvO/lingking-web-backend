@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import time
+import uuid
 
 import auth
 
@@ -74,6 +75,7 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS submissions (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid          TEXT UNIQUE,
                 board         TEXT NOT NULL,
                 status        TEXT NOT NULL DEFAULT 'pending',
                 payload       TEXT NOT NULL,
@@ -86,10 +88,20 @@ def init_db():
             )
             """
         )
+        try:
+            conn.execute("ALTER TABLE submissions ADD COLUMN uuid TEXT")
+        except Exception:
+            pass
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_uuid ON submissions(uuid)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_board ON submissions(board)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_status ON submissions(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_created ON submissions(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_submitter ON submissions(submitter_id)")
+
+        # 补齐已有历史投稿的 uuid
+        missing_uuid_rows = conn.execute("SELECT id FROM submissions WHERE uuid IS NULL OR uuid = ''").fetchall()
+        for r in missing_uuid_rows:
+            conn.execute("UPDATE submissions SET uuid = ? WHERE id = ?", (uuid.uuid4().hex, r["id"]))
 
         conn.execute(
             """
@@ -224,15 +236,16 @@ def update_user_password(uid: int, password_hash: str):
 
 # ----------------- 投稿 ----------------- #
 
-def create_submission(board: str, payload: dict, submitter_id: int, submitter_name: str):
+def create_submission(board: str, payload: dict, submitter_id: int, submitter_name: str, item_uuid: str = None):
     if board not in VALID_BOARDS:
         raise ValueError(f"不支持的板块: {board}")
+    item_uuid = (item_uuid or uuid.uuid4().hex).strip()
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO submissions (board, status, payload, submitter_id, submitter_name, created_at) VALUES (?, 'pending', ?, ?, ?, ?)",
-            (board, json.dumps(payload, ensure_ascii=False), submitter_id, submitter_name or "", int(time.time())),
+            "INSERT INTO submissions (uuid, board, status, payload, submitter_id, submitter_name, created_at) VALUES (?, ?, 'pending', ?, ?, ?, ?)",
+            (item_uuid, board, json.dumps(payload, ensure_ascii=False), submitter_id, submitter_name or "", int(time.time())),
         )
-        return cur.lastrowid
+        return cur.lastrowid, item_uuid
 
 
 def list_submissions(board: str = None, status: str = None, submitter_id: int = None, limit: int = 500):
@@ -261,6 +274,14 @@ def list_submissions(board: str = None, status: str = None, submitter_id: int = 
 def get_submission(sid: int):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def get_submission_by_uuid(item_uuid: str):
+    if not item_uuid:
+        return None
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM submissions WHERE uuid=?", (str(item_uuid).strip(),)).fetchone()
         return _row_to_dict(row) if row else None
 
 
